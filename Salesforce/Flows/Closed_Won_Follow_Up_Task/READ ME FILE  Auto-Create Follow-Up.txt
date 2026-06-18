@@ -1,0 +1,21 @@
+# Auto-Create Follow-Up Task on Closed Won Opportunity
+
+## Business Problem
+Sales representatives may forget to create follow-up tasks after an opportunity is marked Closed Won.
+
+## Solution
+Built an After-Save Record-Triggered Flow that automatically creates a follow-up Task whenever an Opportunity is updated to Closed Won.
+
+## Business Value
+- Reduces manual work
+- Standardizes follow-up activities
+- Improves customer experience
+- Increases consistency across the sales process
+
+## Technologies
+- Salesforce Flow Builder
+- Record-Triggered Flow
+- After-Save Automation
+
+## Status
+Completed and tested successfully.
