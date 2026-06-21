@@ -1,0 +1,67 @@
+============================================================
+              PORTFOLIO AUDITOR v2
+============================================================
+Run Date: 2026-06-21 14:24:21
+
+📁 Salesforce
+------------------------------------------------------------
+
+🔹 Salesforce/Flows
+   ✅ README.md found
+   ✅ Screenshot/image found
+   ✅ Project file found
+
+📁 Tableau
+------------------------------------------------------------
+
+🔹 Tableau/Executive Sales Dashboard
+   ⚠️ README.md missing
+   ✅ Screenshot/image found
+   ✅ Project file found
+
+📁 SOQL
+------------------------------------------------------------
+
+🔹 SOQL/Top_Customers_Analysis
+   ✅ README.md found
+   ⚠️ Screenshot/image missing
+   ✅ Project file found
+
+📁 SQL
+------------------------------------------------------------
+⚠️ No project folders found yet
+
+📁 Excel
+------------------------------------------------------------
+⚠️ No project folders found yet
+
+📁 Python
+------------------------------------------------------------
+
+🔹 Python/Portfolio_Auditor
+   ✅ README.md found
+   ⚠️ Screenshot/image missing
+   ✅ Project file found
+
+📁 AI
+------------------------------------------------------------
+⚠️ No project folders found yet
+
+============================================================
+SUMMARY
+============================================================
+Projects found: 4
+Projects with README: 3
+Projects with screenshots/images: 2
+Projects with project files: 4
+Portfolio Health Score: 75%
+
+Recommendations:
+- Add README.md to Tableau/Executive Sales Dashboard
+- Add a screenshot to SOQL/Top_Customers_Analysis
+- Add at least one project folder inside SQL
+- Add at least one project folder inside Excel
+- Add a screenshot to Python/Portfolio_Auditor
+- Add at least one project folder inside AI
+
+Audit Complete ✅
