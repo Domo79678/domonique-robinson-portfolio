@@ -1,11 +1,20 @@
 # CareerCopilot
 
-CareerCopilot is a Python desktop application that helps job seekers compare a resume against a job description, calculate an ATS-style match score, identify missing keywords, and generate resume improvement suggestions.
+CareerCopilot is a Python desktop application that analyzes resumes against job descriptions, calculates an ATS-style match score, identifies missing skills and keywords, generates actionable resume improvement suggestions, and exports recruiter-friendly reports.
 
 ## Why I Built This
 
 I built CareerCopilot to support my job search while strengthening my Python, automation, and business analysis skills. The goal was to reduce the manual work of reviewing job descriptions and make resume tailoring more focused, repeatable, and data-informed.
 
+## Key Highlights
+
+- Desktop GUI built with Python and Tkinter
+- Supports TXT, DOCX, and PDF resume/job description uploads
+- ATS-style scoring engine with visual gauge
+- Prioritized missing skills analysis
+- Resume improvement recommendations
+- One-click report export
+- Standalone Windows executable (.exe)
 ## Features
 
 * Upload resume files in `.txt`, `.docx`, or `.pdf` format
@@ -18,8 +27,8 @@ I built CareerCopilot to support my job search while strengthening my Python, au
 * Generate resume improvement suggestions
 * Copy missing keywords to clipboard
 * Copy the full report to clipboard
-* Export reports as `.txt`
-* Export reports as `.pdf`
+* Export recruiter reports
+* Generate ATS-friendly analysis summaries
 * Open the reports folder directly from the app
 * Package the app as a standalone Windows `.exe`
 
@@ -47,15 +56,44 @@ I built CareerCopilot to support my job search while strengthening my Python, au
 * Career workflow automation
 * Business problem solving
 
-## Screenshots
+## Architecture
 
-Add screenshots here:
+CareerCopilot follows a simple desktop application architecture:
 
-```markdown
-![CareerCopilot Home](screenshots/screenshot-1.png)
-![CareerCopilot Analysis](screenshots/screenshot-2.png)
-![CareerCopilot Report](screenshots/screenshot-3.png)
-```
+User
+   ↓
+Tkinter GUI
+   ↓
+File Parser
+(TXT / DOCX / PDF)
+   ↓
+Keyword & Phrase Analyzer
+   ↓
+ATS Scoring Engine
+   ↓
+Recommendation Generator
+   ↓
+Report Generator
+   ↓
+TXT / PDF Export
+
+
+
+### Home Screen
+
+![CareerCopilot Home](screenshots/careercopilot-home.png)
+
+---
+
+### Analysis Results
+
+![CareerCopilot Analysis](screenshots/careercopilot-analysis.png)
+
+---
+
+### Generated Report
+
+![CareerCopilot Report](screenshots/careercopilot-report.png)
 
 ## How It Works
 
@@ -85,4 +123,4 @@ JobRadar will help collect job alerts from email, remove duplicates, organize ro
 
 ## Resume Bullet
 
-Built CareerCopilot, a Python desktop application that analyzes resumes against job descriptions, supports TXT/DOCX/PDF uploads, calculates ATS-style match scores, identifies missing keywords, generates resume improvement suggestions, and exports TXT/PDF reports.
+Built CareerCopilot, a Python desktop application that analyzes resumes against job descriptions using an ATS-style scoring engine, supports TXT/DOCX/PDF parsing, identifies missing skills and keywords, generates resume improvement recommendations, and exports recruiter-ready reports while automating parts of the job search workflow.
