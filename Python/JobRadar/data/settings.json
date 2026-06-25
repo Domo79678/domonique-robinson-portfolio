@@ -1,0 +1,43 @@
+{
+    "preferred_locations": [
+        "remote",
+        "hybrid",
+        "minnesota",
+        "united states"
+    ],
+    "preferred_states": [
+        "MN",
+        "Minnesota"
+    ],
+    "avoid_locations": [
+        "india",
+        "australia",
+        "france",
+        "japan",
+        "nigeria",
+        "mexico",
+        "netherlands",
+        "indonesia",
+        "united kingdom",
+        "south korea",
+        "korea",
+        "guam",
+        "philippines",
+        "canada",
+        "ireland",
+        "germany"
+    ],
+    "minimum_salary": 80000,
+    "prefer_remote": true,
+    "prefer_hybrid": true,
+    "allow_onsite": false,
+    "preferred_roles": [
+        "Salesforce Administrator",
+        "CRM Administrator",
+        "Business Analyst",
+        "Sales Operations Analyst",
+        "RevOps Analyst",
+        "Operations Analyst",
+        "Data Analyst"
+    ]
+}
