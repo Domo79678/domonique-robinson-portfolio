@@ -2,9 +2,9 @@ import os
 import re
 import json
 import base64
-from urllib.parse import urlparse, parse_qs, unquote
 from email.utils import parsedate_to_datetime
 from datetime import datetime
+from urllib.parse import parse_qs, unquote, urlparse
 
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -94,9 +94,11 @@ TRACKER_COLUMNS = [
     "recruiter_email",
     "interview_date",
     "salary",
+    "job_link",
     "apply_url",
     "source_email_url",
-    "job_link",
+    "resume_file_suggestion",
+    "resume_test_group",
     "notes",
 ]
 
@@ -302,118 +304,113 @@ def get_email_body(payload):
 
 
 def clean_tracking_url(url):
-    """Clean common email tracking URLs and return the most useful destination."""
+    """Unwrap common redirect/tracking URLs so the Apply link is easier to use."""
     url = str(url or "").strip()
     if not url:
         return ""
 
-    url = url.replace("&amp;", "&")
+    if url.startswith("//"):
+        url = "https:" + url
 
-    try:
-        parsed = urlparse(url)
-        query = parse_qs(parsed.query)
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
 
-        # Google/LinkedIn/Indeed tracking links often hide the real URL in these params.
-        for key in ["url", "u", "q", "target", "redirect", "trk"]:
-            if key in query and query[key]:
-                candidate = unquote(query[key][0])
-                if candidate.startswith("http"):
-                    return candidate
+    # Google and newsletter redirect links often store the real destination here.
+    for key in ["url", "u", "q", "target", "redirect", "redirect_url"]:
+        if key in query and query[key]:
+            candidate = unquote(query[key][0])
+            if candidate.startswith("http"):
+                return candidate
 
-        return url
-    except Exception:
-        return url
+    return url
 
 
-def is_probable_apply_url(url):
-    """Decide whether a URL is likely useful for applying or viewing a job."""
+def is_useful_apply_url(url):
+    """Keep links that are likely to lead to a job/apply page and drop unsubscribe/settings links."""
     url_lower = str(url or "").lower()
-
     if not url_lower.startswith("http"):
         return False
 
-    bad_parts = [
-        "unsubscribe", "privacy", "email-preferences", "preferences",
-        "help", "support", "terms", "login?trk", "trk=unsubscribe",
-        "ad.doubleclick", "googleadservices", "mail-settings"
+    bad_terms = [
+        "unsubscribe", "email-preferences", "preferences", "privacy", "terms",
+        "help", "support", "learning", "premium", "utm_medium=email_preferences",
+        "managealerts", "manage-alerts", "salary", "share"
     ]
-
-    if any(bad in url_lower for bad in bad_parts):
+    if any(term in url_lower for term in bad_terms):
         return False
 
-    good_parts = [
-        "linkedin.com/jobs", "linkedin.com/comm/jobs", "indeed.com",
-        "ziprecruiter.com", "careerbuilder.com", "glassdoor.com",
-        "workdayjobs.com", "myworkdayjobs.com", "greenhouse.io",
-        "lever.co", "smartrecruiters.com", "icims.com", "jobvite.com",
-        "ashbyhq.com", "bamboohr.com", "oraclecloud.com", "successfactors",
-        "jobs.", "/jobs/", "/careers/", "/career/", "apply"
+    good_terms = [
+        "linkedin.com/jobs", "indeed.com", "ziprecruiter", "careerbuilder",
+        "greenhouse.io", "lever.co", "myworkdayjobs", "workdayjobs",
+        "smartrecruiters", "icims", "jobvite", "ashbyhq", "bamboohr",
+        "careers", "jobs", "apply", "jobdetails", "viewjob", "job-detail"
     ]
+    return any(term in url_lower for term in good_terms)
 
-    return any(good in url_lower for good in good_parts)
 
-
-def extract_email_links(raw_html):
-    """Extract links from the original email HTML."""
+def extract_links_from_html(raw_body):
+    """Extract and clean useful links from the original HTML email body."""
+    soup = BeautifulSoup(raw_body or "", "html.parser")
     links = []
-
-    if not raw_html:
-        return links
-
-    soup = BeautifulSoup(raw_html, "html.parser")
-
-    for anchor in soup.find_all("a", href=True):
-        text = clean_export_text(anchor.get_text(" ", strip=True))
-        href = clean_tracking_url(anchor.get("href", ""))
-
-        if href and href.startswith("http"):
-            links.append({
-                "link_text": text,
-                "url": href
-            })
-
-    # Deduplicate while keeping order.
     seen = set()
-    unique_links = []
-    for link in links:
-        if link["url"] not in seen:
-            seen.add(link["url"])
-            unique_links.append(link)
 
-    return unique_links
+    for anchor in soup.find_all("a"):
+        href = anchor.get("href", "")
+        link_text = clean_export_text(anchor.get_text(" "))
+        clean_href = clean_tracking_url(href)
+
+        if not is_useful_apply_url(clean_href):
+            continue
+
+        if clean_href in seen:
+            continue
+
+        seen.add(clean_href)
+        links.append({
+            "url": clean_href,
+            "text": link_text,
+        })
+
+    return links
 
 
-def get_best_apply_url(raw_html):
-    """Return the best apply/view-job URL found in an email."""
-    links = extract_email_links(raw_html)
-
+def choose_apply_url(email, job_title="", company=""):
+    """Pick the best apply URL found in the email for this job."""
+    links = email.get("links", []) or []
     if not links:
         return ""
 
-    # First pass: obvious apply/view job links.
-    preferred_words = ["apply", "view job", "view role", "job details", "see job", "learn more"]
-    for link in links:
-        text = link.get("link_text", "").lower()
-        url = link.get("url", "")
+    title_tokens = [token for token in re.findall(r"[a-z0-9]+", str(job_title).lower()) if len(token) >= 4]
+    company_tokens = [token for token in re.findall(r"[a-z0-9]+", str(company).lower()) if len(token) >= 4]
 
-        if is_probable_apply_url(url) and any(word in text for word in preferred_words):
-            return url
-
-    # Second pass: any probable job URL.
+    scored_links = []
     for link in links:
         url = link.get("url", "")
-        if is_probable_apply_url(url):
-            return url
+        link_text = link.get("text", "")
+        combined = f"{url} {link_text}".lower()
+        score = 0
 
-    return ""
+        if "linkedin.com/jobs" in combined:
+            score += 50
+        if any(term in combined for term in ["apply", "view job", "job", "career", "details"]):
+            score += 25
+        for token in title_tokens[:6]:
+            if token in combined:
+                score += 5
+        for token in company_tokens[:4]:
+            if token in combined:
+                score += 8
+
+        scored_links.append((score, url))
+
+    scored_links.sort(reverse=True, key=lambda item: item[0])
+    return scored_links[0][1] if scored_links else ""
 
 
-def get_email_url(message_id):
-    """Create a Gmail link back to the source email as a fallback."""
+def build_gmail_url(message_id):
     if not message_id:
         return ""
-    return f"https://mail.google.com/mail/u/0/#inbox/{message_id}"
-
+    return f"https://mail.google.com/mail/u/0/#all/{message_id}"
 
 def read_full_email(service, message_id):
     message = service.users().messages().get(
@@ -434,19 +431,19 @@ def read_full_email(service, message_id):
         email_date = date_raw
 
     raw_body = get_email_body(message["payload"])
+    links = extract_links_from_html(raw_body)
     soup = BeautifulSoup(raw_body, "html.parser")
     clean_text = soup.get_text("\n")
 
     return {
-        "message_id": message_id,
         "subject": subject,
         "sender": sender,
         "date": email_date,
         "body": clean_text,
-        "raw_body": raw_body,
-        "apply_url": get_best_apply_url(raw_body),
-        "source_email_url": get_email_url(message_id),
-        "snippet": message.get("snippet", "")
+        "snippet": message.get("snippet", ""),
+        "message_id": message_id,
+        "email_url": build_gmail_url(message_id),
+        "links": links,
     }
 
 
@@ -466,17 +463,16 @@ def is_junk_title(title):
 
 
 def build_job(job_title, company, location, source, email):
-    apply_url = email.get("apply_url", "")
-    source_email_url = email.get("source_email_url", "")
-
+    apply_url = choose_apply_url(email, job_title, company)
     return {
         "job_title": job_title.strip(),
         "company": company.strip(),
         "location": location.strip(),
         "source": source,
         "apply_url": apply_url,
-        "source_email_url": source_email_url,
-        "job_link": apply_url or source_email_url,
+        "job_link": apply_url,
+        "source_email_url": email.get("email_url", ""),
+        "apply_link_status": "Apply Link Found" if apply_url else "Open Source Email",
         "email_subject": email["subject"],
         "email_date": email["date"]
     }
@@ -759,7 +755,8 @@ def get_target_track(job):
         job.get("job_title", ""),
         job.get("company", ""),
         job.get("location", ""),
-        job.get("email_subject", "")
+        job.get("email_subject", ""),
+        job.get("apply_url", "")
     ]).lower()
 
     if any(word in text for word in ["salesforce", "crm"]):
@@ -1130,6 +1127,36 @@ def get_target_strength(job):
     return "Standard"
 
 
+
+def get_resume_file_suggestion(target_track):
+    """Suggest a practical resume file/version to test for callback tracking."""
+    if target_track == "Salesforce / CRM":
+        return "Domonique_Robinson_Salesforce_CRM_Resume"
+    if target_track == "Sales Ops / RevOps":
+        return "Domonique_Robinson_SalesOps_RevOps_Resume"
+    if target_track == "Business Analyst":
+        return "Domonique_Robinson_Business_Analyst_Resume"
+    if target_track == "Data / Reporting":
+        return "Domonique_Robinson_Business_Analytics_Resume"
+    if target_track == "Operations / Supply Chain":
+        return "Domonique_Robinson_Operations_SupplyChain_Resume"
+    return "Domonique_Robinson_Master_Resume"
+
+
+def get_resume_test_group(target_track):
+    """Make it easier to compare which resume version gets callbacks."""
+    if target_track == "Salesforce / CRM":
+        return "Resume Test A - Salesforce CRM"
+    if target_track == "Sales Ops / RevOps":
+        return "Resume Test B - Sales Ops RevOps"
+    if target_track == "Business Analyst":
+        return "Resume Test C - Business Analyst"
+    if target_track == "Data / Reporting":
+        return "Resume Test D - Analytics"
+    if target_track == "Operations / Supply Chain":
+        return "Resume Test E - Operations"
+    return "Resume Test F - General"
+
 def score_job(job):
     job_text = " ".join([
         job.get("job_title", ""),
@@ -1139,7 +1166,9 @@ def score_job(job):
 
     full_text = " ".join([
         job_text,
-        job.get("email_subject", "")
+        job.get("email_subject", ""),
+        job.get("apply_url", ""),
+        job.get("source_email_url", "")
     ]).lower()
 
     score = 0
@@ -1150,30 +1179,36 @@ def score_job(job):
             score += points
             reasons.append(keyword)
 
-    # Resume-aligned boosts based on Domonique's strongest background:
-    # Salesforce Admin, CRM, Flow, reports/dashboards, UAT, operations, Maximo, healthcare/sales.
+    # Resume-aligned bonuses based on Domonique's strongest proof points.
     resume_aligned_terms = {
-        "flow": 20,
-        "flow builder": 25,
-        "reports": 15,
-        "dashboards": 15,
-        "uat": 15,
-        "requirements": 15,
+        "flow": 15,
+        "flow builder": 20,
+        "reports": 12,
+        "dashboards": 12,
+        "uat": 10,
+        "user acceptance": 10,
+        "requirements": 12,
         "stakeholder": 10,
+        "process improvement": 15,
+        "crm data": 10,
         "case management": 10,
         "support queue": 10,
-        "healthcare": 10,
-        "insurance": 10,
-        "maximo": 15,
-        "inventory": 10,
+        "salesforce admin": 20,
+        "salesforce administrator": 25,
+        "agentforce": 15,
+        "maximo": 12,
+        "inventory": 12,
         "procurement": 10,
-        "work orders": 10,
     }
-
     for term, points in resume_aligned_terms.items():
         if term in full_text:
             score += points
-            reasons.append(f"Resume-aligned: {term}")
+            reasons.append(f"Resume aligned: {term}")
+
+    # Apply-link bonus: jobs with direct links are faster to act on.
+    if job.get("apply_url"):
+        score += 10
+        reasons.append("Apply link found")
 
     location_status = get_location_status(job_text)
 
@@ -1231,6 +1266,8 @@ def score_job(job):
     job["fit_category"] = get_fit_category(score)
     job["target_track"] = target_track
     job["recommended_resume"] = get_recommended_resume(target_track)
+    job["resume_file_suggestion"] = get_resume_file_suggestion(target_track)
+    job["resume_test_group"] = get_resume_test_group(target_track)
     job["location_status"] = location_status
     job["company_bonus"] = company_bonus
     job["company_watchlist_category"] = company_category
@@ -1250,126 +1287,20 @@ def score_job(job):
     job["interview_date"] = ""
     job["follow_up_date"] = ""
     job["apply_url"] = job.get("apply_url", "")
+    job["job_link"] = job.get("job_link", job.get("apply_url", ""))
     job["source_email_url"] = job.get("source_email_url", "")
-    job["job_link"] = job.get("apply_url", "") or job.get("source_email_url", "")
+    job["resume_file_suggestion"] = job.get("resume_file_suggestion", get_resume_file_suggestion(target_track))
+    job["resume_test_group"] = job.get("resume_test_group", get_resume_test_group(target_track))
     job["notes"] = ""
 
     return job
 
-def normalize_company(company):
-    company = str(company or "").lower().strip()
-    company = company.replace("&", "and")
-    company = re.sub(r"\b(inc|llc|ltd|corp|corporation|company|companies|co)\b", "", company)
-    company = re.sub(r"[^a-z0-9]+", " ", company)
-    return re.sub(r"\s+", " ", company).strip()
-
-
-def normalize_location(location):
-    location = str(location or "").lower().strip()
-    location = location.replace("work from home", "remote")
-    location = location.replace("united states", "us")
-    location = location.replace("usa", "us")
-    location = re.sub(r"\([^)]*\)", "", location)
-    location = re.sub(r"[^a-z0-9]+", " ", location)
-    location = re.sub(r"\s+", " ", location).strip()
-
-    if "remote" in location:
-        return "remote"
-    if "minneapolis" in location or "st paul" in location or "saint paul" in location or "mn" in location or "minnesota" in location:
-        return "minnesota"
-    if "us" in location:
-        return "us"
-
-    return location or "unknown"
-
-
-def normalize_apply_url(url):
-    """
-    Create a conservative URL key for true duplicate detection.
-
-    Important: job-alert emails often use generic search URLs like
-    linkedin.com/comm/jobs/search?... Those are NOT unique job postings,
-    so they should not be used to collapse different jobs.
-    """
-    url = clean_tracking_url(url)
-    if not url:
-        return ""
-
-    url_lower = url.lower()
-
-    # Never dedupe by generic search/listing pages. These can point to many jobs.
-    generic_search_patterns = [
-        "linkedin.com/comm/jobs/search",
-        "linkedin.com/jobs/search",
-        "google.com/search",
-        "google.com/alerts",
-        "indeed.com/jobs?",
-        "ziprecruiter.com/jobs-search",
-        "/jobs/search",
-        "/search/jobs",
-        "?keywords=",
-        "?keyword=",
-    ]
-    if any(pattern in url_lower for pattern in generic_search_patterns):
-        # Exception: keep URLs that clearly include a specific job id.
-        if not re.search(r"(jobs/view/\d+|viewjob\?jk=[a-z0-9]+|jk=[a-z0-9]+|jobid=[a-z0-9\-]+|job_id=[a-z0-9\-]+|gh_jid=\d+|lever.co/.+/.+|greenhouse.io/.+/jobs/\d+)", url_lower):
-            return ""
-
-    try:
-        parsed = urlparse(url)
-        netloc = parsed.netloc.lower().replace("www.", "")
-        path = parsed.path.lower().rstrip("/")
-        query = parsed.query.lower()
-
-        # Strong job IDs: safe to treat as the same exact posting.
-        job_id_match = re.search(
-            r"(jobs/view/\d+|viewjob\?jk=[a-z0-9]+|jk=[a-z0-9]+|jobid=[a-z0-9\-]+|job_id=[a-z0-9\-]+|gh_jid=\d+|jobs/\d+)",
-            url_lower
-        )
-        if job_id_match:
-            return f"{netloc}|{job_id_match.group(1)}"
-
-        # For known ATS links, domain + path is usually specific enough.
-        ats_domains = [
-            "workdayjobs.com", "myworkdayjobs.com", "greenhouse.io",
-            "lever.co", "smartrecruiters.com", "icims.com", "jobvite.com",
-            "ashbyhq.com", "bamboohr.com", "oraclecloud.com", "successfactors"
-        ]
-        if any(domain in netloc for domain in ats_domains):
-            return f"{netloc}{path}"[:250]
-
-        # If there is no strong job-specific signal, do not dedupe by URL.
-        return ""
-    except Exception:
-        return ""
-
-def create_duplicate_key(job):
-    """
-    Conservative duplicate key.
-
-    1. Use URL only when it clearly points to a specific job posting.
-    2. Otherwise use exact normalized title + company + location.
-    3. If title/company are missing, keep the row instead of risking hiding an opportunity.
-    """
-    apply_key = normalize_apply_url(job.get("apply_url") or job.get("job_link") or "")
-    if apply_key:
-        return f"url|{apply_key}"
-
+def create_job_key(job):
+    """Create a stable key so JobRadar can remember the same job across runs."""
     title = normalize_title(job.get("job_title", ""))
     company = normalize_company(job.get("company", ""))
     location = normalize_location(job.get("location", ""))
-
-    if title and company:
-        return f"job|{title}|{company}|{location}"
-
-    # Missing key fields: make this row unique so JobRadar does not over-delete.
-    subject = clean_export_text(job.get("email_subject", "")).lower()[:80]
-    source = clean_export_text(job.get("source", "")).lower()
-    return f"unique|{title}|{company}|{location}|{source}|{subject}"
-
-def create_job_key(job):
-    """Create a stable key so JobRadar can remember the same job across runs."""
-    return create_duplicate_key(job)
+    return f"{title}|{company}|{location}"
 
 
 def load_application_tracker():
@@ -1428,9 +1359,12 @@ def apply_application_tracker(scored_jobs):
             recruiter_email = saved.get("recruiter_email", "")
             interview_date = saved.get("interview_date", "")
             salary = saved.get("salary", "")
-            apply_url = saved.get("apply_url", "") or job.get("apply_url", "")
+            saved_job_link = saved.get("job_link", "")
+            apply_url = saved.get("apply_url", "") or job.get("apply_url", "") or saved_job_link
             source_email_url = saved.get("source_email_url", "") or job.get("source_email_url", "")
-            job_link = saved.get("job_link", "") or apply_url or source_email_url
+            job_link = apply_url or saved_job_link
+            resume_file_suggestion = saved.get("resume_file_suggestion", "") or job.get("resume_file_suggestion", "")
+            resume_test_group = saved.get("resume_test_group", "") or job.get("resume_test_group", "")
             notes = saved.get("notes", "")
         else:
             status = "Not Applied"
@@ -1446,7 +1380,9 @@ def apply_application_tracker(scored_jobs):
             salary = ""
             apply_url = job.get("apply_url", "")
             source_email_url = job.get("source_email_url", "")
-            job_link = apply_url or source_email_url
+            job_link = apply_url
+            resume_file_suggestion = job.get("resume_file_suggestion", "")
+            resume_test_group = job.get("resume_test_group", "")
             notes = ""
 
             new_tracker_rows.append({
@@ -1464,9 +1400,11 @@ def apply_application_tracker(scored_jobs):
                 "recruiter_email": recruiter_email,
                 "interview_date": interview_date,
                 "salary": salary,
+                "job_link": job_link,
                 "apply_url": apply_url,
                 "source_email_url": source_email_url,
-                "job_link": job_link,
+                "resume_file_suggestion": resume_file_suggestion,
+                "resume_test_group": resume_test_group,
                 "notes": notes,
             })
 
@@ -1482,9 +1420,11 @@ def apply_application_tracker(scored_jobs):
         job["recruiter_email"] = recruiter_email
         job["interview_date"] = interview_date
         job["salary"] = salary
+        job["job_link"] = job_link
         job["apply_url"] = apply_url
         job["source_email_url"] = source_email_url
-        job["job_link"] = job_link
+        job["resume_file_suggestion"] = resume_file_suggestion
+        job["resume_test_group"] = resume_test_group
         job["notes"] = notes
 
     if new_tracker_rows:
@@ -1498,6 +1438,21 @@ def apply_application_tracker(scored_jobs):
     return scored_jobs
 
 
+
+def normalize_company(company):
+    company = str(company or "").lower().strip()
+    company = re.sub(r"\b(inc|llc|ltd|corp|corporation|company|co)\b", "", company)
+    company = re.sub(r"[^a-z0-9]+", " ", company)
+    return re.sub(r"\s+", " ", company).strip()
+
+
+def normalize_location(location):
+    location = str(location or "").lower().strip()
+    location = location.replace("united states", "us")
+    location = location.replace("work from home", "remote")
+    location = re.sub(r"[^a-z0-9, ]+", " ", location)
+    return re.sub(r"\s+", " ", location).strip()
+
 def normalize_title(title):
     title = title.lower()
     title = re.sub(r"\s+", " ", title)
@@ -1508,38 +1463,20 @@ def normalize_title(title):
 
 
 def remove_duplicates(jobs):
-    """Remove duplicate job opportunities and keep an audit trail."""
-    seen = {}
+    seen = set()
     unique_jobs = []
-    duplicate_rows = []
 
     for job in jobs:
-        duplicate_key = create_duplicate_key(job)
-        job["duplicate_key"] = duplicate_key
+        title = normalize_title(job.get("job_title", ""))
+        company = normalize_company(job.get("company", ""))
+        location = normalize_location(job.get("location", ""))
+        key = (title, company, location)
 
-        if duplicate_key not in seen:
-            seen[duplicate_key] = job
+        if key not in seen:
+            seen.add(key)
             unique_jobs.append(job)
-        else:
-            original = seen[duplicate_key]
-            duplicate_rows.append({
-                "duplicate_key": duplicate_key,
-                "kept_job_title": original.get("job_title", ""),
-                "kept_company": original.get("company", ""),
-                "kept_location": original.get("location", ""),
-                "kept_source": original.get("source", ""),
-                "duplicate_job_title": job.get("job_title", ""),
-                "duplicate_company": job.get("company", ""),
-                "duplicate_location": job.get("location", ""),
-                "duplicate_source": job.get("source", ""),
-                "reason": "Same apply URL" if duplicate_key.startswith("url|") else "Same normalized title/company/location",
-                "kept_apply_url": original.get("apply_url", ""),
-                "duplicate_apply_url": job.get("apply_url", ""),
-                "kept_email_subject": original.get("email_subject", ""),
-                "duplicate_email_subject": job.get("email_subject", ""),
-            })
 
-    return unique_jobs, duplicate_rows
+    return unique_jobs
 
 
 def autosize_columns(worksheet):
@@ -1566,6 +1503,37 @@ def style_worksheet(worksheet):
     autosize_columns(worksheet)
 
 
+
+def apply_excel_hyperlinks(worksheet):
+    """Turn URL columns into friendly clickable links in Excel."""
+    headers = {cell.value: cell.column for cell in worksheet[1] if cell.value}
+
+    hyperlink_columns = {
+        "apply_url": "Apply",
+        "job_link": "Apply",
+        "source_email_url": "Open Email",
+    }
+
+    for column_name, label in hyperlink_columns.items():
+        if column_name not in headers:
+            continue
+
+        col_idx = headers[column_name]
+        for row_idx in range(2, worksheet.max_row + 1):
+            cell = worksheet.cell(row=row_idx, column=col_idx)
+            url = str(cell.value or "").strip()
+            if url.startswith("http"):
+                cell.hyperlink = url
+                cell.value = label
+                cell.style = "Hyperlink"
+
+
+def style_workbook(workbook):
+    for sheet_name in workbook.sheetnames:
+        worksheet = workbook[sheet_name]
+        style_worksheet(worksheet)
+        apply_excel_hyperlinks(worksheet)
+
 def build_dashboard_df(df, recruiter_df):
     metrics = [
         ("Total Jobs", len(df)),
@@ -1574,6 +1542,8 @@ def build_dashboard_df(df, recruiter_df):
         ("Review", len(df[df["recommendation"] == "Review"])),
         ("Skip", len(df[df["recommendation"] == "Skip"])),
         ("Weekend Apply List", len(df[df["recommendation"].isin(["Apply Now", "High Priority"])])),
+        ("Apply Links Found", len(df[df.get("apply_url", "").fillna("").astype(str).str.startswith("http")]) if "apply_url" in df.columns else 0),
+        ("Source Email Links", len(df[df.get("source_email_url", "").fillna("").astype(str).str.startswith("http")]) if "source_email_url" in df.columns else 0),
         ("Recruiter Leads", len(recruiter_df)),
         ("Preferred Location Jobs", len(df[df["location_status"] == "Preferred"]) if "location_status" in df.columns else 0),
         ("Outside Target Area", len(df[df["location_status"] == "Outside Target Area"]) if "location_status" in df.columns else 0),
@@ -1634,121 +1604,7 @@ def build_skill_gap_df(df):
 
     return pd.DataFrame(rows)
 
-
-def build_apply_workbook_df(df):
-    """Create the mission-control workbook view for applying."""
-    apply_columns = [
-        "apply_action",
-        "score",
-        "match_percent",
-        "fit_category",
-        "recommended_resume",
-        "resume_used",
-        "application_status",
-        "application_stage",
-        "application_date",
-        "job_title",
-        "company",
-        "location",
-        "salary",
-        "source",
-        "apply_priority",
-        "target_track",
-        "resume_fit_level",
-        "why_this_fits",
-        "potential_concerns",
-        "apply_url",
-        "source_email_url",
-        "job_link",
-        "notes",
-        "job_key",
-    ]
-
-    out = df.copy()
-    out["apply_action"] = out.apply(
-        lambda row: "Apply" if str(row.get("apply_url", "")).startswith("http") else "Open Email",
-        axis=1
-    )
-
-    for column in apply_columns:
-        if column not in out.columns:
-            out[column] = ""
-
-    return out[[col for col in apply_columns if col in out.columns]]
-
-
-def write_apply_workbook(apply_df, path):
-    """Write the main apply workbook with clickable apply links and clean formatting."""
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        apply_df.to_excel(writer, sheet_name="Apply Mission Control", index=False)
-        workbook = writer.book
-        ws = workbook["Apply Mission Control"]
-
-        style_worksheet(ws)
-
-        # Make first column clickable.
-        headers = [cell.value for cell in ws[1]]
-        header_map = {header: idx + 1 for idx, header in enumerate(headers)}
-
-        apply_col = header_map.get("apply_action")
-        apply_url_col = header_map.get("apply_url")
-        email_url_col = header_map.get("source_email_url")
-        score_col = header_map.get("score")
-
-        if apply_col:
-            for row in range(2, ws.max_row + 1):
-                apply_url = ws.cell(row=row, column=apply_url_col).value if apply_url_col else ""
-                email_url = ws.cell(row=row, column=email_url_col).value if email_url_col else ""
-                link = apply_url or email_url
-
-                cell = ws.cell(row=row, column=apply_col)
-                if link:
-                    cell.value = "Apply" if apply_url else "Open Email"
-                    cell.hyperlink = link
-                    cell.style = "Hyperlink"
-
-        # Color-score the sheet so tomorrow's priority is visually obvious.
-        if score_col:
-            green = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-            yellow = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
-            gray = PatternFill(start_color="E7E6E6", end_color="E7E6E6", fill_type="solid")
-
-            for row in range(2, ws.max_row + 1):
-                try:
-                    score = int(ws.cell(row=row, column=score_col).value or 0)
-                except Exception:
-                    score = 0
-
-                if score >= 140:
-                    fill = green
-                elif score >= 90:
-                    fill = yellow
-                else:
-                    fill = gray
-
-                for col in range(1, ws.max_column + 1):
-                    ws.cell(row=row, column=col).fill = fill
-
-        autosize_columns(ws)
-
-
-def write_duplicate_report(duplicate_rows, path):
-    """Write possible duplicates for review."""
-    duplicate_df = pd.DataFrame(duplicate_rows)
-
-    if duplicate_df.empty:
-        duplicate_df = pd.DataFrame([{
-            "status": "No duplicates removed in this scan",
-            "details": "JobRadar did not detect duplicates using URL/title/company/location rules."
-        }])
-
-    with pd.ExcelWriter(path, engine="openpyxl") as writer:
-        duplicate_df.to_excel(writer, sheet_name="Possible Duplicates", index=False)
-        workbook = writer.book
-        for sheet_name in workbook.sheetnames:
-            style_worksheet(workbook[sheet_name])
-
-def export_reports(scored_jobs, recruiter_leads, duplicate_rows=None):
+def export_reports(scored_jobs, recruiter_leads):
     os.makedirs("reports", exist_ok=True)
 
     df = pd.DataFrame(scored_jobs)
@@ -1760,7 +1616,8 @@ def export_reports(scored_jobs, recruiter_leads, duplicate_rows=None):
         recruiter_df, recruiter_crm_df = apply_recruiter_crm(recruiter_df)
 
     preferred_columns = [
-        "job_key", "duplicate_key", "job_title", "company", "location", "source",
+        "job_key", "job_title", "company", "location", "source",
+        "apply_url", "source_email_url", "apply_link_status",
         "score", "match_percent", "fit_category", "target_track",
         "recommended_resume", "resume_fit_level", "resume_fit_score",
         "resume_suggestions", "missing_or_watch_skills", "interview_focus",
@@ -1769,8 +1626,9 @@ def export_reports(scored_jobs, recruiter_leads, duplicate_rows=None):
         "location_status", "company_bonus",
         "company_watchlist_category", "target_strength", "recommendation", "apply_priority",
         "application_status", "application_stage", "application_date", "resume_used",
+        "resume_file_suggestion", "resume_test_group",
         "cover_letter_used", "recruiter_name", "recruiter_email", "interview_date",
-        "salary", "follow_up_date", "last_updated", "apply_url", "source_email_url", "job_link", "notes",
+        "salary", "follow_up_date", "last_updated", "job_link", "notes",
         "match_reasons", "email_subject", "email_date"
     ]
 
@@ -1790,6 +1648,7 @@ def export_reports(scored_jobs, recruiter_leads, duplicate_rows=None):
 
     all_path = "reports/job_radar_results.csv"
     apply_path = "reports/apply_now.csv"
+    apply_excel_path = "reports/apply_now.xlsx"
     high_path = "reports/high_priority.csv"
     review_path = "reports/review.csv"
     skip_path = "reports/skip.csv"
@@ -1804,8 +1663,6 @@ def export_reports(scored_jobs, recruiter_leads, duplicate_rows=None):
     job_intelligence_excel_path = "reports/job_intelligence.xlsx"
     skill_gap_path = "reports/skill_gap_analysis.csv"
     skill_gap_excel_path = "reports/skill_gap_analysis.xlsx"
-    apply_excel_path = "reports/apply_now.xlsx"
-    duplicates_excel_path = "reports/possible_duplicates.xlsx"
     excel_path = "reports/job_radar.xlsx"
 
     apply_df = df[df["recommendation"] == "Apply Now"]
@@ -1815,7 +1672,7 @@ def export_reports(scored_jobs, recruiter_leads, duplicate_rows=None):
     weekend_df = df[df["recommendation"].isin(["Apply Now", "High Priority"])]
     dashboard_df = build_dashboard_df(df, recruiter_df)
     job_intelligence_columns = [
-        "job_title", "company", "location", "source",
+        "job_title", "company", "location", "source", "apply_url", "source_email_url",
         "score", "fit_category", "target_track", "recommended_resume",
         "resume_fit_level", "job_intelligence_summary", "why_this_fits",
         "resume_focus", "job_intelligence_interview_focus",
@@ -1824,7 +1681,6 @@ def export_reports(scored_jobs, recruiter_leads, duplicate_rows=None):
     ]
     job_intelligence_df = df[[col for col in job_intelligence_columns if col in df.columns]]
     skill_gap_df = build_skill_gap_df(df)
-    apply_workbook_df = build_apply_workbook_df(apply_df)
 
     df.to_csv(all_path, index=False)
     apply_df.to_csv(apply_path, index=False)
@@ -1834,7 +1690,6 @@ def export_reports(scored_jobs, recruiter_leads, duplicate_rows=None):
     weekend_df.to_csv(weekend_path, index=False)
     job_intelligence_df.to_csv(job_intelligence_path, index=False)
     skill_gap_df.to_csv(skill_gap_path, index=False)
-    pd.DataFrame(duplicate_rows or []).to_csv("reports/possible_duplicates.csv", index=False)
     recruiter_df.to_csv(recruiter_path, index=False)
     recruiter_crm_df.to_csv(recruiter_crm_path, index=False)
     tracker_df = load_application_tracker()
@@ -1845,31 +1700,30 @@ def export_reports(scored_jobs, recruiter_leads, duplicate_rows=None):
     company_watchlist_df = load_company_watchlist()
     company_watchlist_df.to_csv(company_watchlist_path, index=False)
 
-    write_apply_workbook(apply_workbook_df, apply_excel_path)
-    write_duplicate_report(duplicate_rows or [], duplicates_excel_path)
+    with pd.ExcelWriter(apply_excel_path, engine="openpyxl") as writer:
+        apply_df.to_excel(writer, sheet_name="Apply Now", index=False)
+        workbook = writer.book
+        style_workbook(workbook)
 
     with pd.ExcelWriter(job_intelligence_excel_path, engine="openpyxl") as writer:
         job_intelligence_df.to_excel(writer, sheet_name="Job Intelligence", index=False)
         workbook = writer.book
-        for sheet_name in workbook.sheetnames:
-            style_worksheet(workbook[sheet_name])
+        style_workbook(workbook)
 
     with pd.ExcelWriter(skill_gap_excel_path, engine="openpyxl") as writer:
         skill_gap_df.to_excel(writer, sheet_name="Skill Gap Analysis", index=False)
         workbook = writer.book
-        for sheet_name in workbook.sheetnames:
-            style_worksheet(workbook[sheet_name])
+        style_workbook(workbook)
 
     with pd.ExcelWriter(recruiter_crm_excel_path, engine="openpyxl") as writer:
         recruiter_crm_df.to_excel(writer, sheet_name="Recruiter CRM", index=False)
         workbook = writer.book
-        for sheet_name in workbook.sheetnames:
-            style_worksheet(workbook[sheet_name])
+        style_workbook(workbook)
 
     with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
         dashboard_df.to_excel(writer, sheet_name="Dashboard", index=False)
         weekend_df.to_excel(writer, sheet_name="Weekend Apply List", index=False)
-        apply_workbook_df.to_excel(writer, sheet_name="Apply Now", index=False)
+        apply_df.to_excel(writer, sheet_name="Apply Now", index=False)
         high_df.to_excel(writer, sheet_name="High Priority", index=False)
         review_df.to_excel(writer, sheet_name="Review", index=False)
         skip_df.to_excel(writer, sheet_name="Skip", index=False)
@@ -1880,18 +1734,15 @@ def export_reports(scored_jobs, recruiter_leads, duplicate_rows=None):
         settings_df.to_excel(writer, sheet_name="Settings", index=False)
         job_intelligence_df.to_excel(writer, sheet_name="Job Intelligence", index=False)
         skill_gap_df.to_excel(writer, sheet_name="Skill Gap Analysis", index=False)
-        pd.DataFrame(duplicate_rows or []).to_excel(writer, sheet_name="Possible Duplicates", index=False)
         df.to_excel(writer, sheet_name="All Jobs", index=False)
 
         workbook = writer.book
-        for sheet_name in workbook.sheetnames:
-            style_worksheet(workbook[sheet_name])
+        style_workbook(workbook)
 
     return {
         "all": all_path,
         "apply": apply_path,
         "apply_excel": apply_excel_path,
-        "duplicates_excel": duplicates_excel_path,
         "high": high_path,
         "review": review_path,
         "skip": skip_path,
@@ -1914,14 +1765,13 @@ def export_reports(scored_jobs, recruiter_leads, duplicate_rows=None):
         "skip_count": len(skip_df),
         "weekend_count": len(weekend_df),
         "recruiter_count": len(recruiter_df),
-        "duplicates_removed": len(duplicate_rows or []),
     }
 
 
 def main():
     print("\nConnecting to Gmail...\n")
     service = connect_gmail()
-    print("[OK] Gmail Connected Successfully!\n")
+    print("✅ Gmail Connected Successfully!\n")
 
     messages = search_job_alert_emails(service)
     print(f"Found {len(messages)} job alert emails from the last 14 days.\n")
@@ -1956,16 +1806,15 @@ def main():
             print(f"Reading recruiter lead #{index}: {email['subject']}")
             recruiter_leads.append(lead)
 
-    all_jobs, duplicate_rows = remove_duplicates(all_jobs)
+    all_jobs = remove_duplicates(all_jobs)
     scored_jobs = [score_job(job) for job in all_jobs]
     scored_jobs = apply_application_tracker(scored_jobs)
     scored_jobs = sorted(scored_jobs, key=lambda x: x["score"], reverse=True)
 
-    export_info = export_reports(scored_jobs, recruiter_leads, duplicate_rows)
+    export_info = export_reports(scored_jobs, recruiter_leads)
 
-    print("\n[OK] Job extraction complete.")
+    print("\n✅ Job extraction complete.")
     print(f"Found {export_info['total']} unique jobs.")
-    print(f"Duplicates removed: {export_info['duplicates_removed']}")
     print(f"Apply Now: {export_info['apply_count']}")
     print(f"High Priority: {export_info['high_count']}")
     print(f"Review: {export_info['review_count']}")
@@ -1977,7 +1826,6 @@ def main():
     print(f"- {export_info['all']}")
     print(f"- {export_info['apply']}")
     print(f"- {export_info['apply_excel']}")
-    print(f"- {export_info['duplicates_excel']}")
     print(f"- {export_info['high']}")
     print(f"- {export_info['review']}")
     print(f"- {export_info['skip']}")
@@ -2002,6 +1850,7 @@ def main():
         print(f"Company: {job['company']}")
         print(f"Location: {job['location']}")
         print(f"Source: {job['source']}")
+        print(f"Apply URL: {job.get('apply_url', '') or job.get('source_email_url', '')}")
         print(f"Score: {job['score']}")
         print(f"Match %: {job['match_percent']}%")
         print(f"Fit Category: {job['fit_category']}")

@@ -1284,36 +1284,9 @@ def normalize_location(location):
 
 
 def normalize_apply_url(url):
-    """
-    Create a conservative URL key for true duplicate detection.
-
-    Important: job-alert emails often use generic search URLs like
-    linkedin.com/comm/jobs/search?... Those are NOT unique job postings,
-    so they should not be used to collapse different jobs.
-    """
     url = clean_tracking_url(url)
     if not url:
         return ""
-
-    url_lower = url.lower()
-
-    # Never dedupe by generic search/listing pages. These can point to many jobs.
-    generic_search_patterns = [
-        "linkedin.com/comm/jobs/search",
-        "linkedin.com/jobs/search",
-        "google.com/search",
-        "google.com/alerts",
-        "indeed.com/jobs?",
-        "ziprecruiter.com/jobs-search",
-        "/jobs/search",
-        "/search/jobs",
-        "?keywords=",
-        "?keyword=",
-    ]
-    if any(pattern in url_lower for pattern in generic_search_patterns):
-        # Exception: keep URLs that clearly include a specific job id.
-        if not re.search(r"(jobs/view/\d+|viewjob\?jk=[a-z0-9]+|jk=[a-z0-9]+|jobid=[a-z0-9\-]+|job_id=[a-z0-9\-]+|gh_jid=\d+|lever.co/.+/.+|greenhouse.io/.+/jobs/\d+)", url_lower):
-            return ""
 
     try:
         parsed = urlparse(url)
@@ -1321,36 +1294,18 @@ def normalize_apply_url(url):
         path = parsed.path.lower().rstrip("/")
         query = parsed.query.lower()
 
-        # Strong job IDs: safe to treat as the same exact posting.
-        job_id_match = re.search(
-            r"(jobs/view/\d+|viewjob\?jk=[a-z0-9]+|jk=[a-z0-9]+|jobid=[a-z0-9\-]+|job_id=[a-z0-9\-]+|gh_jid=\d+|jobs/\d+)",
-            url_lower
-        )
+        # Keep strong job ids when available.
+        job_id_match = re.search(r"(jobs/view/\d+|viewjob\?jk=[a-z0-9]+|jobid=[a-z0-9\-]+|job_id=[a-z0-9\-]+)", url.lower())
         if job_id_match:
             return f"{netloc}|{job_id_match.group(1)}"
 
-        # For known ATS links, domain + path is usually specific enough.
-        ats_domains = [
-            "workdayjobs.com", "myworkdayjobs.com", "greenhouse.io",
-            "lever.co", "smartrecruiters.com", "icims.com", "jobvite.com",
-            "ashbyhq.com", "bamboohr.com", "oraclecloud.com", "successfactors"
-        ]
-        if any(domain in netloc for domain in ats_domains):
-            return f"{netloc}{path}"[:250]
-
-        # If there is no strong job-specific signal, do not dedupe by URL.
-        return ""
+        return f"{netloc}{path}?{query}"[:250]
     except Exception:
-        return ""
+        return url[:250]
+
 
 def create_duplicate_key(job):
-    """
-    Conservative duplicate key.
-
-    1. Use URL only when it clearly points to a specific job posting.
-    2. Otherwise use exact normalized title + company + location.
-    3. If title/company are missing, keep the row instead of risking hiding an opportunity.
-    """
+    """Create a duplicate key using apply URL when available, otherwise normalized job fields."""
     apply_key = normalize_apply_url(job.get("apply_url") or job.get("job_link") or "")
     if apply_key:
         return f"url|{apply_key}"
@@ -1359,13 +1314,8 @@ def create_duplicate_key(job):
     company = normalize_company(job.get("company", ""))
     location = normalize_location(job.get("location", ""))
 
-    if title and company:
-        return f"job|{title}|{company}|{location}"
+    return f"job|{title}|{company}|{location}"
 
-    # Missing key fields: make this row unique so JobRadar does not over-delete.
-    subject = clean_export_text(job.get("email_subject", "")).lower()[:80]
-    source = clean_export_text(job.get("source", "")).lower()
-    return f"unique|{title}|{company}|{location}|{source}|{subject}"
 
 def create_job_key(job):
     """Create a stable key so JobRadar can remember the same job across runs."""
